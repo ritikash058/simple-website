@@ -27,64 +27,75 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy to EC2 (With Credentials Workaround)
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+    - name: Deploy to EC2
       env:
         SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
         EC2_HOST: ${{ secrets.EC2_HOST }}
         EC2_USER: ubuntu
-        AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
-        AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       run: |
         echo "$SSH_PRIVATE_KEY" > npc-fe.pem
         chmod 600 npc-fe.pem
         
-        # Get AWS account ID
+        # Get AWS account ID in GitHub runner
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        echo "AWS Account ID: $AWS_ACCOUNT_ID"
         
-        # Create deployment script with embedded AWS credentials
-        cat > deploy.sh << EOF
+        # Create deployment script
+        cat > deploy.sh << 'EOF'
         #!/bin/bash
         set -e
         
-        # Set AWS credentials (passed from GitHub)
-        export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY"
-        export AWS_SECRET_ACCESS_KEY="$AWS_SECRET_KEY"
-        export AWS_REGION="${{ env.AWS_REGION }}"
-        
+        AWS_REGION="${{ env.AWS_REGION }}"
         ECR_REPOSITORY="${{ env.ECR_REPOSITORY }}"
         IMAGE_TAG="${{ github.sha }}"
         
-        echo "=== Deployment Started ==="
-        echo "Using AWS credentials from GitHub"
+        # Get account ID from EC2 metadata (NOW WORKS!)
+        AWS_ACCOUNT_ID=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep -oP '(?<="accountId" : ")[^"]*')
+        echo "AWS Account ID from metadata: $AWS_ACCOUNT_ID"
         
-        # Login to ECR
+        # Login to ECR using IAM role
         echo "Logging into ECR..."
-        aws ecr get-login-password --region \$AWS_REGION | \\
-          docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.\$AWS_REGION.amazonaws.com
+        aws ecr get-login-password --region $AWS_REGION | \
+          docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
         
         # Pull image
-        echo "Pulling image..."
-        docker pull $AWS_ACCOUNT_ID.dkr.ecr.\$AWS_REGION.amazonaws.com/\$ECR_REPOSITORY:\$IMAGE_TAG
+        echo "Pulling Docker image..."
+        docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
         
-        # Deploy
+        # Stop old container
         docker stop simple-website 2>/dev/null || true
         docker rm simple-website 2>/dev/null || true
         
-        docker run -d \\
-          --name simple-website \\
-          -p 80:80 \\
-          --restart unless-stopped \\
-          $AWS_ACCOUNT_ID.dkr.ecr.\$AWS_REGION.amazonaws.com/\$ECR_REPOSITORY:\$IMAGE_TAG
+        # Run new container
+        docker run -d \
+          --name simple-website \
+          -p 80:80 \
+          --restart unless-stopped \
+          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
         
-        echo "✅ Deployment complete!"
-        
-        # Clean credentials from memory
-        unset AWS_ACCESS_KEY_ID
-        unset AWS_SECRET_ACCESS_KEY
-        echo "aws_access_key_id = " > ~/.aws/credentials 2>/dev/null || true
+        echo "✅ Deployment completed!"
+        echo "Website URL: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
+        echo ""
+        echo "Container status:"
+        docker ps --filter name=simple-website
         EOF
         
-        # Copy and execute
+        # Deploy
         scp -i npc-fe.pem -o StrictHostKeyChecking=no deploy.sh $EC2_USER@$EC2_HOST:~/deploy.sh
         ssh -i npc-fe.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh"
         
