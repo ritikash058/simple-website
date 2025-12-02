@@ -48,8 +48,8 @@ jobs:
         EC2_HOST: ${{ secrets.EC2_HOST }}
         EC2_USER: ubuntu
       run: |
-        echo "$SSH_PRIVATE_KEY" > private_key.pem
-        chmod 600 private_key.pem
+        echo "$SSH_PRIVATE_KEY" > npc-fe.pem
+        chmod 600 npc-fe.pem
         
         # Create deployment script on EC2
         cat > deploy.sh << 'EOF'
@@ -80,8 +80,8 @@ jobs:
         EOF
         
         # Copy and execute on EC2
-        scp -o StrictHostKeyChecking=no -i private_key.pem deploy.sh $EC2_USER@$EC2_HOST:~/deploy.sh
-        ssh -o StrictHostKeyChecking=no -i private_key.pem $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh"
+        scp -o StrictHostKeyChecking=no -i npc-fe.pem deploy.sh $EC2_USER@$EC2_HOST:~/deploy.sh
+        ssh -o StrictHostKeyChecking=no -i npc-fe.pem $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh"
         
         # Cleanup
-        rm -f private_key.pem deploy.sh
+        rm -f npc-fe.pem deploy.sh
