@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>My Simple Website</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f2f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+        }
+        .status {
+            padding: 10px;
+            background: #4CAF50;
+            color: white;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Docker + AWS ECR + EC2 Deployment</h1>
+        <div class="status">
+            ✅ Successfully deployed using Docker!
+        </div>
+        <p>This is a simple website deployed using:</p>
+        <ul>
+            <li>Docker Container</li>
+            <li>AWS ECR (Elastic Container Registry)</li>
+            <li>AWS EC2 Instance</li>
+            <li>GitHub Actions for CI/CD</li>
+        </ul>
+        <p>Current time: <span id="datetime"></span></p>
+    </div>
+
+    <script>
+        function updateDateTime() {
+            const now = new Date();
+            document.getElementById('datetime').textContent = now.toLocaleString();
+        }
+        updateDateTime();
+        setInterval(updateDateTime, 1000);
+    </script>
+</body>
+</html>
