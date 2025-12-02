@@ -42,7 +42,7 @@ jobs:
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-    - name: Deploy to EC2
+    - name: Deploy to EC2 (Using IAM Role)
       env:
         SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
         EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -51,22 +51,21 @@ jobs:
         echo "$SSH_PRIVATE_KEY" > npc-fe.pem
         chmod 600 npc-fe.pem
         
-        # Get AWS account ID in GitHub runner
+        # Get AWS account ID
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-        echo "AWS Account ID: $AWS_ACCOUNT_ID"
         
-        # Create deployment script
+        # Create deployment script using EC2's IAM role
         cat > deploy.sh << 'EOF'
         #!/bin/bash
         set -e
         
-        AWS_REGION="${{ env.AWS_REGION }}"
-        ECR_REPOSITORY="${{ env.ECR_REPOSITORY }}"
-        IMAGE_TAG="${{ github.sha }}"
+        AWS_REGION="$AWS_REGION"
+        ECR_REPOSITORY="$ECR_REPOSITORY"
+        IMAGE_TAG="$IMAGE_TAG"
         
-        # Get account ID from EC2 metadata (NOW WORKS!)
+        # Get account ID from EC2 metadata (uses IAM role)
         AWS_ACCOUNT_ID=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep -oP '(?<="accountId" : ")[^"]*')
-        echo "AWS Account ID from metadata: $AWS_ACCOUNT_ID"
+        echo "AWS Account ID: $AWS_ACCOUNT_ID"
         
         # Login to ECR using IAM role
         echo "Logging into ECR..."
@@ -74,29 +73,28 @@ jobs:
           docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
         
         # Pull image
-        echo "Pulling Docker image..."
+        echo "Pulling image..."
         docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
         
-        # Stop old container
+        # Deploy
         docker stop simple-website 2>/dev/null || true
         docker rm simple-website 2>/dev/null || true
         
-        # Run new container
         docker run -d \
           --name simple-website \
           -p 80:80 \
           --restart unless-stopped \
           $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
         
-        echo "✅ Deployment completed!"
-        echo "Website URL: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
-        echo ""
-        echo "Container status:"
-        docker ps --filter name=simple-website
+        echo "✅ Deployment complete!"
+        echo "Website: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
         EOF
         
-        # Deploy
-        scp -i npc-fe.pem -o StrictHostKeyChecking=no deploy.sh $EC2_USER@$EC2_HOST:~/deploy.sh
-        ssh -i npc-fe.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh"
+        # Pass environment variables to EC2
+        ssh -i npc-fe.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST \
+          "AWS_REGION='${{ env.AWS_REGION }}' \
+           ECR_REPOSITORY='${{ env.ECR_REPOSITORY }}' \
+           IMAGE_TAG='${{ github.sha }}' \
+           bash -s" < deploy.sh
         
         rm -f npc-fe.pem deploy.sh
