@@ -42,14 +42,20 @@ jobs:
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-    - name: Deploy to EC2
+    -     - name: Deploy to EC2
       env:
         SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
         EC2_HOST: ${{ secrets.EC2_HOST }}
         EC2_USER: ubuntu
       run: |
+        # Create the SSH key file with your pem name
         echo "$SSH_PRIVATE_KEY" > npc-fe.pem
         chmod 600 npc-fe.pem
+        
+        # Debug: Check key file
+        echo "=== Checking SSH key ==="
+        head -1 npc-fe.pem
+        ls -la npc-fe.pem
         
         # Create deployment script on EC2
         cat > deploy.sh << 'EOF'
@@ -58,30 +64,77 @@ jobs:
         AWS_REGION="${{ env.AWS_REGION }}"
         ECR_REPOSITORY="${{ env.ECR_REPOSITORY }}"
         IMAGE_TAG="${{ github.sha }}"
-        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        
+        # Get AWS account ID from EC2 instance metadata
+        AWS_ACCOUNT_ID=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep -oP '(?<="accountId" : ")[^"]*' || echo "")
+        
+        if [ -z "$AWS_ACCOUNT_ID" ]; then
+          echo "ERROR: Could not get AWS account ID from metadata"
+          echo "Make sure EC2 has IAM role with ECR permissions"
+          exit 1
+        fi
+        
+        echo "Using AWS Account: $AWS_ACCOUNT_ID"
+        echo "Region: $AWS_REGION"
+        echo "ECR Repository: $ECR_REPOSITORY"
+        echo "Image Tag: $IMAGE_TAG"
         
         # Login to ECR
+        echo "Logging into ECR..."
         aws ecr get-login-password --region $AWS_REGION | \
           docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
         
-        # Pull and run new container
+        # Pull new image
+        echo "Pulling Docker image..."
         docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
         
         # Stop old container
-        docker stop simple-website || true
-        docker rm simple-website || true
+        echo "Stopping old container..."
+        docker stop simple-website 2>/dev/null || true
+        docker rm simple-website 2>/dev/null || true
         
         # Run new container
+        echo "Starting new container..."
         docker run -d \
           --name simple-website \
           -p 80:80 \
           --restart unless-stopped \
           $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+        
+        echo "✅ Deployment completed!"
+        echo "Container status:"
+        docker ps --filter "name=simple-website"
         EOF
         
-        # Copy and execute on EC2
-        scp -o StrictHostKeyChecking=no -i npc-fe.pem deploy.sh $EC2_USER@$EC2_HOST:~/deploy.sh
-        ssh -o StrictHostKeyChecking=no -i npc-fe.pem $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh"
+        # Make script executable locally
+        chmod +x deploy.sh
+        
+        # Test SSH connection first
+        echo "Testing SSH connection..."
+        ssh -i npc-fe.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            $EC2_USER@$EC2_HOST "echo 'SSH connection successful!'" || {
+          echo "ERROR: SSH connection failed!"
+          echo "Check:"
+          echo "1. EC2_SSH_KEY secret contains correct private key"
+          echo "2. Public key is in EC2's authorized_keys"
+          echo "3. Security group allows SSH (port 22)"
+          exit 1
+        }
+        
+        # Copy deployment script to EC2
+        echo "Copying deployment script to EC2..."
+        scp -i npc-fe.pem \
+            -o StrictHostKeyChecking=no \
+            deploy.sh \
+            $EC2_USER@$EC2_HOST:~/deploy.sh
+        
+        # Execute on EC2
+        echo "Running deployment on EC2..."
+        ssh -i npc-fe.pem \
+            -o StrictHostKeyChecking=no \
+            $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh"
         
         # Cleanup
         rm -f npc-fe.pem deploy.sh
