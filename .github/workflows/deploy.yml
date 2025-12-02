@@ -42,59 +42,98 @@ jobs:
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-    - name: Deploy to EC2 (Using IAM Role)
+    - name: Deploy to EC2
       env:
         SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
         EC2_HOST: ${{ secrets.EC2_HOST }}
         EC2_USER: ubuntu
       run: |
+        # Create the SSH key file with your pem name
         echo "$SSH_PRIVATE_KEY" > npc-fe.pem
         chmod 600 npc-fe.pem
         
-        # Get AWS account ID
-        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        # Debug: Check key file
+        echo "=== Checking SSH key ==="
+        head -1 npc-fe.pem
+        ls -la npc-fe.pem
         
-        # Create deployment script using EC2's IAM role
+        # Create deployment script on EC2
         cat > deploy.sh << 'EOF'
         #!/bin/bash
         set -e
+        AWS_REGION="${{ env.AWS_REGION }}"
+        ECR_REPOSITORY="${{ env.ECR_REPOSITORY }}"
+        IMAGE_TAG="${{ github.sha }}"
         
-        AWS_REGION="$AWS_REGION"
-        ECR_REPOSITORY="$ECR_REPOSITORY"
-        IMAGE_TAG="$IMAGE_TAG"
+        # Get AWS account ID from EC2 instance metadata
+        AWS_ACCOUNT_ID=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep -oP '(?<="accountId" : ")[^"]*' || echo "")
         
-        # Get account ID from EC2 metadata (uses IAM role)
-        AWS_ACCOUNT_ID=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep -oP '(?<="accountId" : ")[^"]*')
-        echo "AWS Account ID: $AWS_ACCOUNT_ID"
+        if [ -z "$AWS_ACCOUNT_ID" ]; then
+          echo "ERROR: Could not get AWS account ID from metadata"
+          echo "Make sure EC2 has IAM role with ECR permissions"
+          exit 1
+        fi
         
-        # Login to ECR using IAM role
+        echo "Using AWS Account: $AWS_ACCOUNT_ID"
+        echo "Region: $AWS_REGION"
+        echo "ECR Repository: $ECR_REPOSITORY"
+        echo "Image Tag: $IMAGE_TAG"
+        
+        # Login to ECR
         echo "Logging into ECR..."
-        aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+        aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 986422066065.dkr.ecr.ap-south-1.amazonaws.com
         
-        # Pull image
-        echo "Pulling image..."
-        docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+        # Pull new image
+        echo "Pulling Docker image..."
+        docker pull 986422066065.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
         
-        # Deploy
+        # Stop old container
+        echo "Stopping old container..."
         docker stop simple-website 2>/dev/null || true
         docker rm simple-website 2>/dev/null || true
         
+        # Run new container
+        echo "Starting new container..."
         docker run -d \
           --name simple-website \
           -p 80:80 \
           --restart unless-stopped \
-          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          986422066065.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
         
-        echo "✅ Deployment complete!"
-        echo "Website: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
+        echo "✅ Deployment completed!"
+        echo "Container status:"
+        docker ps --filter "name=simple-website"
         EOF
         
-        # Pass environment variables to EC2
-        ssh -i npc-fe.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST \
-          "AWS_REGION='${{ env.AWS_REGION }}' \
-           ECR_REPOSITORY='${{ env.ECR_REPOSITORY }}' \
-           IMAGE_TAG='${{ github.sha }}' \
-           bash -s" < deploy.sh
+        # Make script executable locally
+        chmod +x deploy.sh
         
+        # Test SSH connection first
+        echo "Testing SSH connection..."
+        ssh -i npc-fe.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            $EC2_USER@$EC2_HOST "echo 'SSH connection successful!'" || {
+          echo "ERROR: SSH connection failed!"
+          echo "Check:"
+          echo "1. EC2_SSH_KEY secret contains correct private key"
+          echo "2. Public key is in EC2's authorized_keys"
+          echo "3. Security group allows SSH (port 22)"
+          exit 1
+        }
+        
+        # Copy deployment script to EC2
+        echo "Copying deployment script to EC2..."
+        scp -i npc-fe.pem \
+            -o StrictHostKeyChecking=no \
+            deploy.sh \
+            $EC2_USER@$EC2_HOST:~/deploy.sh
+        
+        # Execute on EC2
+        echo "Running deployment on EC2..."
+        ssh -i npc-fe.pem \
+            -o StrictHostKeyChecking=no \
+            $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh"
+        
+        # Cleanup
         rm -f npc-fe.pem deploy.sh
